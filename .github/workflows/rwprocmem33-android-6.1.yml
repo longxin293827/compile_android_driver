@@ -1,0 +1,107 @@
+name: Build rwProcMem33 Android 6.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: Android common kernel branch version
+        required: true
+        default: "14"
+      kernel_version:
+        description: Android common kernel version
+        required: true
+        default: "6.1"
+      target_arch:
+        description: Target architecture
+        required: true
+        default: aarch64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      MODULE_DIR: rwProcMem_module
+      MODULE_KO: rwProcMem_module.ko
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
+
+      - name: Install repo tool
+        run: |
+          sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
+
+      - name: Set up Android common kernel
+        run: |
+          mkdir -p android-kernel
+          cd android-kernel
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+
+      - name: Copy rwProcMem33 module
+        run: |
+          cp -r "$MODULE_DIR" "android-kernel/common/drivers/$MODULE_DIR"
+
+      - name: Register rwProcMem33 module
+        run: |
+          cd android-kernel
+          echo "obj-y += $MODULE_DIR/" >> common/drivers/Makefile
+
+          MODULE_PATH="drivers/$MODULE_DIR/$MODULE_KO"
+          awk -v module="$MODULE_PATH" '
+            BEGIN { added=0 }
+            /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
+            in_list && $0 ~ "\"" module "\"" { added=1 }
+            in_list && /\]/ {
+              if (!added) {
+                print "    \"" module "\","
+                added=1
+              }
+              in_list=0
+            }
+            in_list && !added {
+              if (module < $0) {
+                print "    \"" module "\","
+                added=1
+              }
+            }
+            { print }
+          ' common/modules.bzl > common/modules.bzl.tmp
+          mv common/modules.bzl.tmp common/modules.bzl
+
+      - name: Increase stack frame size limit
+        run: |
+          cd android-kernel
+          find . -type f -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
+          grep -q "FRAME_WARN" common/Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> common/Makefile
+
+      - name: Build rwProcMem33 module
+        run: |
+          cd android-kernel
+          tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
+          echo "OUTPUT_PATH=out/kernel_${{ github.event.inputs.target_arch }}" >> "$GITHUB_ENV"
+
+      - name: Upload rwProcMem33 artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: rwProcMem33-${{ github.event.inputs.target_arch }}-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
+          path: |
+            android-kernel/${{ env.OUTPUT_PATH }}/rwProcMem_module.ko
+            android-kernel/${{ env.OUTPUT_PATH }}
