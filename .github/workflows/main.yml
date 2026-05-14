@@ -110,10 +110,18 @@ jobs:
           tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
           echo "OUTPUT_PATH=out/kernel_${{ github.event.inputs.target_arch }}" >> "$GITHUB_ENV"
 
+      - name: Collect module artifacts
+        run: |
+          mkdir -p artifacts
+          find "android-kernel/${{ env.OUTPUT_PATH }}" -name "rwProcMem_module.ko" -exec cp -v {} artifacts/ \;
+          find "android-kernel/${{ env.OUTPUT_PATH }}" -name "hwBreakpointProc_module.ko" -exec cp -v {} artifacts/ \;
+          ls -lh artifacts
+          test -f artifacts/rwProcMem_module.ko
+          test -f artifacts/hwBreakpointProc_module.ko
+
       - name: Upload module artifacts
         uses: actions/upload-artifact@v4.6.2
         with:
           name: rwProcMem33-modules-${{ github.event.inputs.target_arch }}-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
-          path: |
-            android-kernel/${{ env.OUTPUT_PATH }}/rwProcMem_module.ko
-            android-kernel/${{ env.OUTPUT_PATH }}/hwBreakpointProc_module.ko
+          path: artifacts/*.ko
+          if-no-files-found: error
