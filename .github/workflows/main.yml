@@ -1,133 +1,119 @@
-name: Android Kernel Driver Builder
+name: Build rwProcMem33 Android modules
 
 on:
   workflow_dispatch:
     inputs:
       android_version:
-        description: 'Android Version (Kernel) (e.g., 14) (for 4.x kernel should be empty)'
-        required: false
+        description: Android common kernel branch version
+        required: true
+        default: "14"
       kernel_version:
-        description: 'Kernel Version (e.g., 6.1)'
+        description: Android common kernel version
         required: true
-      driver_name:
-        description: 'Driver Module Name (e.g., mydriver.ko)'
-        required: true
+        default: "6.1"
       target_arch:
-        description: 'Target Architecture (aarch64, x86_64, etc.)'
+        description: Target architecture
         required: true
-        default: 'aarch64'
+        default: aarch64
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
+    env:
+      MODULES: |
+        rwProcMem_module:rwProcMem_module.ko
+        hwBreakpointProc_module:hwBreakpointProc_module.ko
+
     steps:
-      - name: Maximize Build Space
+      - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 8192
           temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
 
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
-        
-      - name: Prepare kerneldriver directory
+
+      - name: Install dependencies
         run: |
-          mkdir kerneldriver
-          mv ./code/*.h ./code/*.c ./code/Makefile kerneldriver/
-          
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
+
       - name: Install repo tool
         run: |
           sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+x /usr/local/bin/repo
 
-      - name: Set up Android Kernel source
+      - name: Set up Android common kernel
         run: |
-          mkdir -p android-kernel && cd android-kernel
+          mkdir -p android-kernel
+          cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: Copy kerneldriver
+      - name: Copy modules
         run: |
-          cd android-kernel
-          cp -r ../kerneldriver common/drivers
+          while IFS=: read -r module_dir module_ko; do
+            [ -n "$module_dir" ] || continue
+            cp -r "$module_dir" "android-kernel/common/drivers/$module_dir"
+          done <<< "$MODULES"
 
-      - name: Modify Makefile
+      - name: Register modules
         run: |
           cd android-kernel
-          echo "obj-y += kerneldriver/" >> common/drivers/Makefile
 
-      - name: Add module to GKI modules list
-        if: ${{ github.event.inputs.android_version > 13 }}
-        run: |
-          cd android-kernel
-          MODULE_NAME="drivers/kerneldriver/${{ github.event.inputs.driver_name }}"
-          
-          awk -i inplace -v module="$MODULE_NAME" '
-            BEGIN { added=0 }
-            /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
-            in_list && /\]/ {
-              if (!added) {
-                print "    \"" module "\","
-                added=1
+          while IFS=: read -r module_dir module_ko; do
+            [ -n "$module_dir" ] || continue
+            grep -q "obj-y += $module_dir/" common/drivers/Makefile || \
+              echo "obj-y += $module_dir/" >> common/drivers/Makefile
+          done <<< "$MODULES"
+
+          while IFS=: read -r module_dir module_ko; do
+            [ -n "$module_dir" ] || continue
+            module_path="drivers/$module_dir/$module_ko"
+            awk -v module="$module_path" '
+              BEGIN { added=0 }
+              /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
+              in_list && $0 ~ "\"" module "\"" { added=1 }
+              in_list && /\]/ {
+                if (!added) {
+                  print "    \"" module "\","
+                  added=1
+                }
+                in_list=0
               }
-              in_list=0
-            }
-            in_list && !added {
-              if (module < $0) {
-                print "    \"" module "\","
-                added=1
+              in_list && !added {
+                if (module < $0) {
+                  print "    \"" module "\","
+                  added=1
+                }
               }
-            }
-            { print }
-          ' common/modules.bzl
-          
-      - name: Prepare module list for legacy builds
-        if: ${{ github.event.inputs.android_version <= 13 }}
-        run: |
-          cd android-kernel
-          echo "drivers/kerneldriver/${{ github.event.inputs.driver_name }}" >> common/android/gki_aarch64_modules
+              { print }
+            ' common/modules.bzl > common/modules.bzl.tmp
+            mv common/modules.bzl.tmp common/modules.bzl
+          done <<< "$MODULES"
+
       - name: Increase stack frame size limit
         run: |
           cd android-kernel
           find . -type f -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
           grep -q "FRAME_WARN" common/Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> common/Makefile
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
-      - name: Fix missing kprobe symbols for Android 13
-        if: ${{ github.event.inputs.android_version == 13 }}
+      - name: Build modules
         run: |
           cd android-kernel
-          for symbol in register_kprobe unregister_kprobe; do
-            grep -q "$symbol" common/android/abi_gki_${{ github.event.inputs.target_arch }} || \
-            echo "$symbol" >> common/android/abi_gki_${{ github.event.inputs.target_arch }}
-          done
-          sed -i '/EXPORT_SYMBOL(unregister_kprobe);/a EXPORT_SYMBOL(register_kprobe);' common/kernel/kprobes.c
-          
-      - name: Build kernel module
-        run: |
-          cd android-kernel
-          if [ ${{ github.event.inputs.android_version }} -le 13 ]; then
-            BUILD_CONFIG=common/build.config.gki.${{ github.event.inputs.target_arch }} LTO=thin build/build.sh -j32
-            OUTPUT_PATH="out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/dist"
-          else
-            echo "Using Bazel build system for Android ${{ github.event.inputs.android_version }}"
-            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
-            OUTPUT_PATH="out/kernel_${{ github.event.inputs.target_arch }}"
-          fi
-          echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
-        continue-on-error: true
-      
-      - name: Upload artifacts
+          tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
+          echo "OUTPUT_PATH=out/kernel_${{ github.event.inputs.target_arch }}" >> "$GITHUB_ENV"
+
+      - name: Upload module artifacts
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: kernel-driver-${{ github.event.inputs.target_arch }}
+          name: rwProcMem33-modules-${{ github.event.inputs.target_arch }}-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
           path: |
-            android-kernel/${{ env.OUTPUT_PATH }}
+            android-kernel/${{ env.OUTPUT_PATH }}/rwProcMem_module.ko
+            android-kernel/${{ env.OUTPUT_PATH }}/hwBreakpointProc_module.ko
