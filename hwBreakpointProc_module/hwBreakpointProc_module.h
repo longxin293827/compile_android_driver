@@ -76,13 +76,42 @@ struct HWBP_HIT_ITEM {
 	uint64_t hit_time;
 	struct my_user_pt_regs regs_info;
 };
+
+enum HWBP_HIT_REG_TYPE {
+	HWBP_HIT_REG_NONE = 0,
+	HWBP_HIT_REG_X = 1,
+	HWBP_HIT_REG_W = 2,
+	HWBP_HIT_REG_SP = 3,
+	HWBP_HIT_REG_PC = 4,
+};
+
+struct HWBP_HIT_REG_WRITE_RULE {
+	uint8_t enabled;
+	uint8_t reg_type;
+	uint8_t reg_index;
+	uint8_t flags;
+	uint64_t value;
+};
+
+struct HWBP_INSTALL_EX_CONFIG {
+	uint64_t bp_handle;
+	uint32_t magic;
+	uint16_t version;
+	uint16_t size;
+	struct HWBP_HIT_REG_WRITE_RULE hit_write;
+};
 #pragma pack()
+
+#define HWBP_INSTALL_EX_MAGIC 0x48574558U
+#define HWBP_INSTALL_EX_VERSION 1U
+#define HWBP_INSTALL_FLAG_HIT_REG_WRITE (1ULL << 16)
 
 struct HWBP_HANDLE_INFO {
 	uint64_t task_id;
 	struct perf_event * sample_hbp;
 	struct perf_event_attr original_attr;
 	bool is_32bit_task;
+	struct HWBP_HIT_REG_WRITE_RULE hit_write;
 #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
 	struct perf_event_attr next_instruction_attr;
 #endif

@@ -82,6 +82,94 @@ static void hwbp_hit_user_info_callback(struct perf_event *bp,
 	record_hit_details(hwbp_handle_info, regs);
 }
 
+static bool hwbp_hit_reg_write_rule_valid(struct HWBP_HIT_REG_WRITE_RULE *rule) {
+	if (!rule || !rule->enabled) {
+		return true;
+	}
+	if (rule->flags != 0) {
+		return false;
+	}
+	switch (rule->reg_type) {
+	case HWBP_HIT_REG_X:
+	case HWBP_HIT_REG_W:
+		return rule->reg_index <= 30;
+	case HWBP_HIT_REG_SP:
+	case HWBP_HIT_REG_PC:
+		return rule->reg_index == 0;
+	default:
+		return false;
+	}
+}
+
+static bool hwbp_load_install_ex_config(struct ioctl_request *hdr, char __user* buf,
+	struct HWBP_HIT_REG_WRITE_RULE *rule) {
+	struct HWBP_INSTALL_EX_CONFIG config = {0};
+	if (!hdr || !buf || !rule) {
+		return false;
+	}
+	if ((hdr->param3 & HWBP_INSTALL_FLAG_HIT_REG_WRITE) == 0) {
+		memset(rule, 0, sizeof(*rule));
+		return true;
+	}
+	if (hdr->buf_size < sizeof(config)) {
+		return false;
+	}
+	if (x_copy_from_user(&config, buf, sizeof(config))) {
+		return false;
+	}
+	if (config.magic != HWBP_INSTALL_EX_MAGIC ||
+		config.version != HWBP_INSTALL_EX_VERSION ||
+		config.size != sizeof(config)) {
+		return false;
+	}
+	if (!hwbp_hit_reg_write_rule_valid(&config.hit_write)) {
+		return false;
+	}
+	memcpy(rule, &config.hit_write, sizeof(*rule));
+	return true;
+}
+
+static void hwbp_apply_hit_reg_write(struct HWBP_HANDLE_INFO *hwbp_handle_info,
+	struct pt_regs *regs) {
+	struct HWBP_HIT_REG_WRITE_RULE *rule;
+	if (!hwbp_handle_info || !regs) {
+		return;
+	}
+	rule = &hwbp_handle_info->hit_write;
+	if (!rule->enabled) {
+		return;
+	}
+	switch (rule->reg_type) {
+	case HWBP_HIT_REG_X:
+		if (rule->reg_index <= 30) {
+			regs->regs[rule->reg_index] = rule->value;
+		}
+		break;
+	case HWBP_HIT_REG_W:
+		if (rule->reg_index <= 30) {
+			regs->regs[rule->reg_index] = (uint32_t)rule->value;
+		}
+		break;
+	case HWBP_HIT_REG_SP:
+		regs->sp = rule->value;
+		break;
+	case HWBP_HIT_REG_PC:
+		regs->pc = rule->value;
+		break;
+	default:
+		break;
+	}
+}
+
+static bool hwbp_hit_reg_write_targets_pc(struct HWBP_HANDLE_INFO *hwbp_handle_info) {
+	struct HWBP_HIT_REG_WRITE_RULE *rule;
+	if (!hwbp_handle_info) {
+		return false;
+	}
+	rule = &hwbp_handle_info->hit_write;
+	return rule->enabled && rule->reg_type == HWBP_HIT_REG_PC;
+}
+
 /*
  * Handle hitting a HW-breakpoint.
  */
@@ -108,13 +196,16 @@ static void hwbp_handler(struct perf_event *bp,
 		if(hwbp_handle_info->next_instruction_attr.bp_addr != regs->pc) {
 			// first hit
 			bool should_toggle = true;
+			bool write_pc = hwbp_hit_reg_write_targets_pc(hwbp_handle_info);
+			uint64_t hit_pc = regs->pc;
+			hwbp_apply_hit_reg_write(hwbp_handle_info, regs);
 			hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
-			if(!hwbp_handle_info->is_32bit_task) {
-				if(arm64_move_bp_to_next_instruction(bp, regs->pc + 4, &hwbp_handle_info->original_attr, &hwbp_handle_info->next_instruction_attr)) {
+			if(!write_pc && !hwbp_handle_info->is_32bit_task) {
+				if(arm64_move_bp_to_next_instruction(bp, hit_pc + 4, &hwbp_handle_info->original_attr, &hwbp_handle_info->next_instruction_attr)) {
 					should_toggle = false;
 				}
 			}
-			if(should_toggle) {
+			if(!write_pc && should_toggle) {
 				toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
 			}
 		} else {
@@ -124,8 +215,11 @@ static void hwbp_handler(struct perf_event *bp,
 			}
 		}
 #else
+		hwbp_apply_hit_reg_write(hwbp_handle_info, regs);
 		hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
-		toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
+		if(!hwbp_hit_reg_write_targets_pc(hwbp_handle_info)) {
+			toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
+		}
 #endif
 	}
 	
@@ -178,6 +272,7 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
 	uint64_t proc_virt_addr = hdr->param2;
 	char hwbp_len  =  hdr->param3 & 0xFF;
 	char hwbp_type = (hdr->param3 >> 8) & 0xFF;
+	struct HWBP_HIT_REG_WRITE_RULE hit_write = {0};
 
 	pid_t pid_val;
 	struct task_struct *task;
@@ -187,6 +282,9 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
 	printk_debug(KERN_INFO "proc_virt_addr :%px\n", proc_virt_addr);
 	printk_debug(KERN_INFO "hwbp_len:%zu\n", hwbp_len);
 	printk_debug(KERN_INFO "hwbp_type:%d\n", hwbp_type);
+	if (!hwbp_load_install_ex_config(hdr, buf, &hit_write)) {
+		return -EINVAL;
+	}
 
 	pid_val = pid_nr(proc_pid_struct);
 	printk_debug(KERN_INFO "pid_val:%d\n", pid_val);
@@ -204,6 +302,7 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user* buf)
 	
 	hwbp_handle_info.task_id = pid_val;
 	hwbp_handle_info.is_32bit_task = is_compat_thread(task_thread_info(task));
+	memcpy(&hwbp_handle_info.hit_write, &hit_write, sizeof(hit_write));
 	ptrace_breakpoint_init(&hwbp_handle_info.original_attr);
 	hwbp_handle_info.original_attr.bp_addr = proc_virt_addr;
 	hwbp_handle_info.original_attr.bp_len = hwbp_len;
@@ -588,4 +687,3 @@ unsigned long __stack_chk_guard;
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Linux");
 MODULE_DESCRIPTION("Linux default module");
-
