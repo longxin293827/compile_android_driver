@@ -1,6 +1,7 @@
 #include "hwBreakpointProc_module.h"
 #include "proc_pid.h"
 #include "api_proxy.h"
+#include "fpsimd_action_helper.h"
 #include "anti_ptrace_detection.h"
 
 
@@ -86,16 +87,22 @@ static bool hwbp_hit_reg_write_rule_valid(struct HWBP_HIT_REG_WRITE_RULE *rule) 
 	if (!rule || !rule->enabled) {
 		return true;
 	}
-	if (rule->flags != 0) {
+	if (rule->flags & ~HWBP_HIT_REG_WRITE_FLAG_SKIP_INSN) {
 		return false;
 	}
 	switch (rule->reg_type) {
+	case HWBP_HIT_REG_NONE:
+		return true;
 	case HWBP_HIT_REG_X:
 	case HWBP_HIT_REG_W:
 		return rule->reg_index <= 30;
 	case HWBP_HIT_REG_SP:
 	case HWBP_HIT_REG_PC:
 		return rule->reg_index == 0;
+	case HWBP_HIT_REG_S:
+		return rule->reg_index <= 31;
+	case HWBP_HIT_REG_PSTATE_NZCV:
+		return rule->reg_index == 0 && (rule->value & ~0xfULL) == 0;
 	default:
 		return false;
 	}
@@ -129,17 +136,21 @@ static bool hwbp_load_install_ex_config(struct ioctl_request *hdr, char __user* 
 	return true;
 }
 
-static void hwbp_apply_hit_reg_write(struct HWBP_HANDLE_INFO *hwbp_handle_info,
-	struct pt_regs *regs) {
+static bool hwbp_apply_hit_reg_write(struct HWBP_HANDLE_INFO *hwbp_handle_info,
+	struct pt_regs *regs, uint64_t hit_pc) {
 	struct HWBP_HIT_REG_WRITE_RULE *rule;
+	bool applied = true;
+	bool pc_changed = false;
 	if (!hwbp_handle_info || !regs) {
-		return;
+		return false;
 	}
 	rule = &hwbp_handle_info->hit_write;
 	if (!rule->enabled) {
-		return;
+		return false;
 	}
 	switch (rule->reg_type) {
+	case HWBP_HIT_REG_NONE:
+		break;
 	case HWBP_HIT_REG_X:
 		if (rule->reg_index <= 30) {
 			regs->regs[rule->reg_index] = rule->value;
@@ -155,19 +166,35 @@ static void hwbp_apply_hit_reg_write(struct HWBP_HANDLE_INFO *hwbp_handle_info,
 		break;
 	case HWBP_HIT_REG_PC:
 		regs->pc = rule->value;
+		pc_changed = true;
+		break;
+	case HWBP_HIT_REG_S:
+		applied = hwbp_write_current_s_reg(rule->reg_index, (uint32_t)rule->value);
+		break;
+	case HWBP_HIT_REG_PSTATE_NZCV:
+		hwbp_write_pstate_nzcv(regs, (uint32_t)rule->value);
 		break;
 	default:
 		break;
 	}
+
+	if (applied && (rule->flags & HWBP_HIT_REG_WRITE_FLAG_SKIP_INSN)) {
+		regs->pc = hit_pc + 4;
+		pc_changed = true;
+	}
+
+	return applied && pc_changed;
 }
 
-static bool hwbp_hit_reg_write_targets_pc(struct HWBP_HANDLE_INFO *hwbp_handle_info) {
+static bool hwbp_hit_reg_write_changes_pc(struct HWBP_HANDLE_INFO *hwbp_handle_info) {
 	struct HWBP_HIT_REG_WRITE_RULE *rule;
 	if (!hwbp_handle_info) {
 		return false;
 	}
 	rule = &hwbp_handle_info->hit_write;
-	return rule->enabled && rule->reg_type == HWBP_HIT_REG_PC;
+	return rule->enabled &&
+		(rule->reg_type == HWBP_HIT_REG_PC ||
+		 (rule->flags & HWBP_HIT_REG_WRITE_FLAG_SKIP_INSN));
 }
 
 /*
@@ -196,16 +223,17 @@ static void hwbp_handler(struct perf_event *bp,
 		if(hwbp_handle_info->next_instruction_attr.bp_addr != regs->pc) {
 			// first hit
 			bool should_toggle = true;
-			bool write_pc = hwbp_hit_reg_write_targets_pc(hwbp_handle_info);
+			bool pc_changed;
+			bool will_change_pc = hwbp_hit_reg_write_changes_pc(hwbp_handle_info);
 			uint64_t hit_pc = regs->pc;
-			hwbp_apply_hit_reg_write(hwbp_handle_info, regs);
+			pc_changed = hwbp_apply_hit_reg_write(hwbp_handle_info, regs, hit_pc);
 			hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
-			if(!write_pc && !hwbp_handle_info->is_32bit_task) {
+			if(!will_change_pc && !pc_changed && !hwbp_handle_info->is_32bit_task) {
 				if(arm64_move_bp_to_next_instruction(bp, hit_pc + 4, &hwbp_handle_info->original_attr, &hwbp_handle_info->next_instruction_attr)) {
 					should_toggle = false;
 				}
 			}
-			if(!write_pc && should_toggle) {
+			if(!will_change_pc && !pc_changed && should_toggle) {
 				toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
 			}
 		} else {
@@ -215,9 +243,9 @@ static void hwbp_handler(struct perf_event *bp,
 			}
 		}
 #else
-		hwbp_apply_hit_reg_write(hwbp_handle_info, regs);
+		bool pc_changed = hwbp_apply_hit_reg_write(hwbp_handle_info, regs, regs->pc);
 		hwbp_hit_user_info_callback(bp, data, regs, hwbp_handle_info);
-		if(!hwbp_hit_reg_write_targets_pc(hwbp_handle_info)) {
+		if(!hwbp_hit_reg_write_changes_pc(hwbp_handle_info) && !pc_changed) {
 			toggle_bp_registers_directly(&hwbp_handle_info->original_attr, hwbp_handle_info->is_32bit_task, 0);
 		}
 #endif

@@ -14,6 +14,9 @@
 static unsigned long (*kallsyms_lookup_name_sym)(const char *name);
 static struct perf_event* (*register_user_hw_breakpoint_sym)(struct perf_event_attr *attr, perf_overflow_handler_t triggered, void *context, struct task_struct *tsk);
 static void (*unregister_hw_breakpoint_sym)(struct perf_event *bp);
+struct user_fpsimd_state;
+static void (*fpsimd_preserve_current_state_sym)(void);
+static void (*fpsimd_update_current_state_sym)(struct user_fpsimd_state const *state);
 #ifdef CONFIG_MODIFY_HIT_NEXT_MODE
 static int (*modify_user_hw_breakpoint_sym)(struct perf_event *bp, struct perf_event_attr *attr);
 #endif
@@ -58,6 +61,14 @@ static bool init_kallsyms_lookup(void) {
 	printk_debug(KERN_EMERG "modify_user_hw_breakpoint_sym:%px\n", modify_user_hw_breakpoint_sym);
 	if(!modify_user_hw_breakpoint_sym) { return false; }
 #endif
+
+	fpsimd_preserve_current_state_sym = (void *)generic_kallsyms_lookup_name("fpsimd_preserve_current_state");
+	printk_debug(KERN_EMERG "fpsimd_preserve_current_state_sym:%px\n", fpsimd_preserve_current_state_sym);
+	if(!fpsimd_preserve_current_state_sym) { return false; }
+
+	fpsimd_update_current_state_sym = (void *)generic_kallsyms_lookup_name("fpsimd_update_current_state");
+	printk_debug(KERN_EMERG "fpsimd_update_current_state_sym:%px\n", fpsimd_update_current_state_sym);
+	if(!fpsimd_update_current_state_sym) { return false; }
 
 	return true;
 }
