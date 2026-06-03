@@ -105,60 +105,13 @@ static void hwbp_a64_abs_branch(u32 *buf, unsigned long addr)
 	buf[3] = (u32)(addr >> 32);
 }
 
-static pte_t *hwbp_kernel_pte(unsigned long addr)
-{
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
-
-	pgd = pgd_offset_k(addr);
-	if (!pgd || pgd_none(READ_ONCE(*pgd))) {
-		return NULL;
-	}
-	p4d = p4d_offset(pgd, addr);
-	if (!p4d || p4d_none(READ_ONCE(*p4d))) {
-		return NULL;
-	}
-	pud = pud_offset(p4d, addr);
-	if (!pud || pud_none(READ_ONCE(*pud)) || pud_sect(READ_ONCE(*pud))) {
-		return NULL;
-	}
-	pmd = pmd_offset(pud, addr);
-	if (!pmd || pmd_none(READ_ONCE(*pmd)) || pmd_sect(READ_ONCE(*pmd))) {
-		return NULL;
-	}
-	return pte_offset_kernel(pmd, addr);
-}
-
 static int hwbp_patch_one_nosync(void *addr, u32 insn)
 {
-	pte_t *ptep;
-	pte_t old_pte;
-	pte_t rw_pte;
-	unsigned long va = (unsigned long)addr;
-
 	if (aarch64_insn_patch_text_nosync_sym) {
 		return aarch64_insn_patch_text_nosync_sym(addr, insn);
 	}
 
-	ptep = hwbp_kernel_pte(va);
-	if (!ptep) {
-		return -EFAULT;
-	}
-
-	old_pte = READ_ONCE(*ptep);
-	rw_pte = pte_mkwrite(old_pte);
-	rw_pte = clear_pte_bit(rw_pte, __pgprot(PTE_RDONLY));
-	set_pte(ptep, rw_pte);
-	flush_tlb_kernel_range(va & PAGE_MASK, (va & PAGE_MASK) + PAGE_SIZE);
-
-	WRITE_ONCE(*(u32 *)addr, insn);
-	flush_icache_range(va, va + sizeof(u32));
-
-	set_pte(ptep, old_pte);
-	flush_tlb_kernel_range(va & PAGE_MASK, (va & PAGE_MASK) + PAGE_SIZE);
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 struct hwbp_patch_set {

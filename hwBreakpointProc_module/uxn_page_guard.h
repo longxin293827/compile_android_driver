@@ -154,7 +154,7 @@ static bool hwbp_guard_set_bucket_exec(struct hwbp_page_bucket *bucket, bool exe
 	}
 
 	if (!pte_same(pte, new_pte)) {
-		set_pte_at(bucket->mm, bucket->page_addr, ptep, new_pte);
+		set_pte(ptep, new_pte);
 		changed = true;
 	}
 	pte_unmap_unlock(ptep, ptl);
