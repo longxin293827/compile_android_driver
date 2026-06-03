@@ -17,10 +17,8 @@
 #define CONFIG_KALLSYMS_LOOKUP_NAME
 
 // 精准命中记录模式
-#define CONFIG_MODIFY_HIT_NEXT_MODE
 
 // 反PTRACE侦测模式
-#define CONFIG_ANTI_PTRACE_DETECTION_MODE
 
 #ifndef KERNEL_VERSION
 #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))

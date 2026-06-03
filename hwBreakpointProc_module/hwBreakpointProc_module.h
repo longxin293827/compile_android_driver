@@ -14,13 +14,15 @@
 #include <linux/kernel.h>
 #include <linux/version.h>
 #include <linux/kallsyms.h>
-#include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/ksm.h>
 #include <linux/mutex.h>
 #include <linux/ktime.h>
 #include <linux/pid.h>
 #include <linux/slab.h> //kmalloc与kfree
+#include <linux/list.h>
+#include <linux/atomic.h>
+#include <linux/spinlock.h>
 #include "ver_control.h"
 #include "arm64_register_helper.h"
 #include "cvector.h"
@@ -117,15 +119,20 @@ struct HWBP_INSTALL_EX_CONFIG {
 
 struct HWBP_HANDLE_INFO {
 	uint64_t task_id;
-	struct perf_event * sample_hbp;
-	struct perf_event_attr original_attr;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned long hook_addr;
+	unsigned long page_addr;
+	void *page_bucket;
 	bool is_32bit_task;
+	bool suspended;
+	bool auto_released;
 	struct HWBP_HIT_REG_WRITE_RULE hit_write;
-#ifdef CONFIG_MODIFY_HIT_NEXT_MODE
-	struct perf_event_attr next_instruction_attr;
-#endif
 	size_t hit_total_count;
 	cvector hit_item_arr;
+	struct list_head page_node;
+	atomic_t active_handlers;
+	spinlock_t hit_lock;
 };
 
 #endif /* _HWBP_PROC_H_ */
