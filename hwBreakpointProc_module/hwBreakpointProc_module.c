@@ -16,6 +16,7 @@ struct ioctl_request {
 #pragma pack(pop)
 
 static atomic64_t g_hook_pc;
+static DEFINE_MUTEX(g_hwbp_runtime_mutex);
 static struct mutex g_hwbp_handle_info_mutex;
 static cvector g_hwbp_handle_info_arr;
 
@@ -25,6 +26,8 @@ static struct hwbp_inline_hook g_pagemap_read_hook;
 static hwbp_do_mem_abort_t g_orig_do_mem_abort;
 static hwbp_do_debug_exception_t g_orig_do_debug_exception;
 static hwbp_pagemap_read_t g_orig_pagemap_read;
+static bool g_inline_hooks_installed;
+static bool g_pmu_guard_started;
 
 static void record_hit_details(struct HWBP_HANDLE_INFO *info, struct pt_regs *regs)
 {
@@ -335,6 +338,48 @@ static void hwbp_uninstall_inline_hooks(void)
 	g_orig_do_mem_abort = NULL;
 }
 
+static int hwbp_start_runtime(void)
+{
+	int ret = 0;
+
+	mutex_lock(&g_hwbp_runtime_mutex);
+	if (!g_inline_hooks_installed) {
+		ret = hwbp_install_inline_hooks();
+		if (ret) {
+			goto out_unlock;
+		}
+		g_inline_hooks_installed = true;
+	}
+
+	if (!g_pmu_guard_started) {
+		ret = hwbp_pmu_el0_guard_start();
+		if (ret) {
+			hwbp_uninstall_inline_hooks();
+			g_inline_hooks_installed = false;
+			goto out_unlock;
+		}
+		g_pmu_guard_started = true;
+	}
+
+out_unlock:
+	mutex_unlock(&g_hwbp_runtime_mutex);
+	return ret;
+}
+
+static void hwbp_stop_runtime(void)
+{
+	mutex_lock(&g_hwbp_runtime_mutex);
+	if (g_inline_hooks_installed) {
+		hwbp_uninstall_inline_hooks();
+		g_inline_hooks_installed = false;
+	}
+	if (g_pmu_guard_started) {
+		hwbp_pmu_el0_guard_stop();
+		g_pmu_guard_started = false;
+	}
+	mutex_unlock(&g_hwbp_runtime_mutex);
+}
+
 static ssize_t OnCmdOpenProcess(struct ioctl_request *hdr, char __user *buf)
 {
 	uint64_t pid = hdr->param1;
@@ -409,6 +454,11 @@ static ssize_t OnCmdInstProcessHwbp(struct ioctl_request *hdr, char __user *buf)
 	task = pid_task(proc_pid_struct, PIDTYPE_PID);
 	if (!task) {
 		return -EINVAL;
+	}
+
+	ret = hwbp_start_runtime();
+	if (ret) {
+		return ret;
 	}
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
@@ -705,22 +755,10 @@ static int hwBreakpointProc_dev_init(void)
 		goto out_destroy_mutex;
 	}
 
-	ret = hwbp_install_inline_hooks();
-	if (ret) {
-		printk(KERN_EMERG "hwbp_install_inline_hooks failed:%d\n", ret);
-		goto out_clean_handles;
-	}
-
-	ret = hwbp_pmu_el0_guard_start();
-	if (ret) {
-		printk(KERN_EMERG "hwbp_pmu_el0_guard_start failed:%d\n", ret);
-		goto out_uninstall_hooks;
-	}
-
 	g_hwBreakpointProc_devp = x_kmalloc(sizeof(struct hwBreakpointProcDev), GFP_KERNEL);
 	if (!g_hwBreakpointProc_devp) {
 		ret = -ENOMEM;
-		goto out_stop_pmu;
+		goto out_clean_handles;
 	}
 	memset(g_hwBreakpointProc_devp, 0, sizeof(struct hwBreakpointProcDev));
 
@@ -737,7 +775,6 @@ static int hwBreakpointProc_dev_init(void)
 		ret = -ENOMEM;
 		goto out_remove_proc_parent;
 	}
-	start_hide_procfs_dir(CONFIG_PROC_NODE_AUTH_KEY);
 #endif
 
 #ifdef DEBUG_PRINTK
@@ -755,10 +792,6 @@ out_free_dev:
 #endif
 	kfree(g_hwBreakpointProc_devp);
 	g_hwBreakpointProc_devp = NULL;
-out_stop_pmu:
-	hwbp_pmu_el0_guard_stop();
-out_uninstall_hooks:
-	hwbp_uninstall_inline_hooks();
 out_clean_handles:
 	clean_hwbp();
 out_destroy_mutex:
@@ -777,13 +810,11 @@ static void hwBreakpointProc_dev_exit(void)
 		proc_remove(g_hwBreakpointProc_devp->proc_parent);
 		g_hwBreakpointProc_devp->proc_parent = NULL;
 	}
-	stop_hide_procfs_dir();
 #endif
 
 	clean_hwbp();
 	hwbp_guard_cleanup_all();
-	hwbp_uninstall_inline_hooks();
-	hwbp_pmu_el0_guard_stop();
+	hwbp_stop_runtime();
 	mutex_destroy(&g_hwbp_handle_info_mutex);
 	kfree(g_hwBreakpointProc_devp);
 	g_hwBreakpointProc_devp = NULL;
