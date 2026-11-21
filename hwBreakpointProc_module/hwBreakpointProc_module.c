@@ -637,6 +637,10 @@ static int hwBreakpointProc_dev_init(void) {
 	start_anti_ptrace_detection(&g_hwbp_handle_info_mutex, &g_hwbp_handle_info_arr);
 #endif
 
+#ifdef CONFIG_ANTI_PERF_DETECTION_MODE
+	start_anti_perf_detection();
+#endif
+
 	g_hwBreakpointProc_devp = x_kmalloc(sizeof(struct hwBreakpointProcDev), GFP_KERNEL);
 	memset(g_hwBreakpointProc_devp, 0, sizeof(struct hwBreakpointProcDev));
 
@@ -664,6 +668,10 @@ static void hwBreakpointProc_dev_exit(void) {
 	
 #ifdef CONFIG_ANTI_PTRACE_DETECTION_MODE
 	stop_anti_ptrace_detection();
+#endif
+
+#ifdef CONFIG_ANTI_PERF_DETECTION_MODE
+	stop_anti_perf_detection();
 #endif
 
 	clean_hwbp();

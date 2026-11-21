@@ -22,6 +22,9 @@
 // 反PTRACE侦测模式
 #define CONFIG_ANTI_PTRACE_DETECTION_MODE
 
+// 反perf_event_open侦测模式（放行+识别，不劫持返回值）
+#define CONFIG_ANTI_PERF_DETECTION_MODE
+
 #ifndef KERNEL_VERSION
 #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
 #endif

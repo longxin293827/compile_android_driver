@@ -28,6 +28,9 @@
 #include <linux/proc_fs.h>
 #include "hide_procfs_dir.h"
 #endif
+#ifdef CONFIG_ANTI_PERF_DETECTION_MODE
+#include "anti_perf_detection.h"
+#endif
 //////////////////////////////////////////////////////////////////
 
 enum {
